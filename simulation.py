@@ -5,6 +5,13 @@ import pandapower.plotting as plot
 import pandapower.topology as top
 from numba import jit
 
+import jax
+import jax.numpy as jnp
+from jax import random, value_and_grad
+from jax.example_libraries import stax
+from jax.example_libraries.stax import Dense, Relu, Softplus
+import optax
+
 from conf.bus_config import location_buses
 from conf.connection_config import line_connections
 from conf.line_config import line_data
@@ -165,6 +172,16 @@ class SimulationDataPreparer:
         loading_info[['p_from_mw']].to_csv('./data/export/p_from_mw.csv', index=True, header=True)
         loading_info[['q_from_mvar']].to_csv('./data/export/q_from_mvar.csv', index=True, header=True)
 
+    @staticmethod
+    def initialize_soc_for_buses(net):
+        """Generates random SOC values for each bus, assuming one battery per bus."""
+        bus_ids = net.bus.index.tolist()  # Get all bus IDs from the network
+        MAX_BATTERY_CAPACITY_KWH = 30
+        # Generate random battery capacities for each bus in kWh, then convert to MWh
+        battery_capacities_mwh = np.random.uniform(low=0, high=MAX_BATTERY_CAPACITY_KWH, size=len(bus_ids)) / 1000.0
+        battery_capacity_dict = dict(zip(bus_ids, battery_capacities_mwh))
+        return battery_capacity_dict
+
     def print_net_info(net):
         print("Network Information:")
         print("-------------------")
@@ -302,6 +319,119 @@ class pre_check_simulation:
         else:
             print("No overloads detected.")
 
+
+class TrainingOutput:
+    def __init__(self, net, battery_capacities):
+        self.net = net
+        self.battery_capacities = battery_capacities 
+        self.init_fun, self.model = self.create_fcnn_model()
+        _, self.params = self.init_fun(random.PRNGKey(42), (-1, 5)) 
+        self.optimizer = optax.adam(0.0001)
+
+        # normalization and denormalization storing
+        self.feature_means = None
+        self.feature_stds = None
+        self.target_means = None
+        self.target_stds = None
+
+    def create_fcnn_model(self):
+        return stax.serial(
+            Dense(128), Relu,
+            Dense(64), Relu,
+            Dense(32), Relu,
+            Dense(16), Relu,
+            Dense(3)
+        )
+
+    def normalize(self, data, means, stds):
+        return (data - means) / stds
+
+    def denormalize(self, data, means, stds):
+        return data * stds + means
+
+    def extract_features_targets(self):
+        num_lines = len(self.net.line)
+        features = np.zeros((num_lines, 5))
+        targets = np.zeros((num_lines, 3))
+
+        for idx, line in enumerate(self.net.line.itertuples()):
+            from_bus = line.from_bus
+            to_bus = line.to_bus
+            gens = [gen for gen in self.net.sgen.itertuples() if gen.bus in [from_bus, to_bus]]
+            loads = [load for load in self.net.load.itertuples() if load.bus in [from_bus, to_bus]]
+            soc = self.battery_capacities.get(from_bus, 0)
+
+            features[idx] = [
+                soc,
+                sum(gen.p_mw for gen in gens),
+                sum(gen.q_mvar for gen in gens),
+                sum(load.p_mw for load in loads),
+                sum(load.q_mvar for load in loads)
+            ]
+
+            targets[idx] = [
+                self.net.res_line.iloc[idx]['p_from_mw'],
+                self.net.res_line.iloc[idx]['q_from_mvar'],
+                self.net.res_line.iloc[idx]['loading_percent']
+            ]
+
+        # Store means and stds for normalization
+        self.feature_means = features.mean(axis=0)
+        self.feature_stds = features.std(axis=0)
+        self.target_means = targets.mean(axis=0)
+        self.target_stds = targets.std(axis=0)
+
+        # Normalize
+        features = self.normalize(features, self.feature_means, self.feature_stds)
+        targets = self.normalize(targets, self.target_means, self.target_stds)
+
+        return features, targets
+
+    def mse_loss(self, params, inputs, targets):
+        preds = self.model(params, inputs)
+        return jnp.mean(jnp.square(preds - targets))
+
+    def train(self, epochs=1000, patience=50):
+        features, targets = self.extract_features_targets()
+        opt_state = self.optimizer.init(self.params)
+        
+        best_loss = float('inf')
+        patience_counter = 0  # Ccount epochs since lawst improvement
+
+        for epoch in range(epochs):
+            loss, grads = value_and_grad(self.mse_loss)(self.params, features, targets)
+            updates, opt_state = self.optimizer.update(grads, opt_state)
+            self.params = optax.apply_updates(self.params, updates)
+
+            if loss < best_loss:
+                best_loss = loss
+                patience_counter = 0  # Reset counter if there's improvement
+            else:
+                patience_counter += 1  # Increment counter if no improvement
+
+            if epoch % 100 == 0 or jnp.isnan(loss):
+                print(f'Epoch {epoch}: Loss = {loss}')
+                if jnp.isnan(loss):
+                    break  # Stop training if loss becomes nan
+
+            if patience_counter >= patience:
+                print(f"Early stopping triggered after {epoch} epochs.")
+                break
+
+    def predict_and_print(self):
+        features, targets = self.extract_features_targets()
+        preds = self.model(self.params, features)
+        denorm_preds = self.denormalize(preds, self.target_means, self.target_stds)
+        denorm_pred_df = pd.DataFrame(denorm_preds, columns=['Predicted_P_from_MW', 'Predicted_Q_from_MVAr', 'Predicted_Loading_Percent'])
+        print("Predicted Values (Denormalized):")
+        print(denorm_pred_df.head())
+
+        # overloaded lines in predicted values
+        overloaded_lines = denorm_pred_df[denorm_pred_df['Predicted_Loading_Percent'] > 100]
+        print("Predicted Overloaded Lines (Loading Percent > 100%):")
+        print(overloaded_lines)
+
+
 def main():
     net = pp.create_empty_network()
 
@@ -326,8 +456,8 @@ def main():
     SimulationDataPreparer.create_new_std_line(net, line_data)
     SimulationDataPreparer.prepare_bus_location_data(location_buses, net)
     SimulationDataPreparer.create_lines(net, line_connections)
-    SimulationDataPreparer.add_sgens_from_generators(net, generator_reactive_power, bus_name_to_index_map, location_buses, generator_data_hourly, 5000)
-    SimulationDataPreparer.add_loads_to_network(net, load_reactive_power, load_reactive_power, bus_name_to_index_map, location_buses, 5000)
+    SimulationDataPreparer.add_sgens_from_generators(net, generator_reactive_power, bus_name_to_index_map, location_buses, generator_data_hourly, 0)
+    SimulationDataPreparer.add_loads_to_network(net, load_reactive_power, load_reactive_power, bus_name_to_index_map, location_buses, 0)
 
     # plotting lines and buses with real geo data from pysa-eu
     # try:
@@ -347,12 +477,21 @@ def main():
 
     # results
     SimulationDataPreparer.info_of_lines_and_export_data(net)
-
     SimulationDataPreparer.print_net_info(net)
+
+    # batteries
+    battery_capacities = SimulationDataPreparer.initialize_soc_for_buses(net)
+    # print("Battery capacities (MWh) for each bus:", battery_capacities)
 
     # pp.diagnostic(net)
 
     pp.runpp(net)
+
+
+    # training
+    training_output = TrainingOutput(net, battery_capacities)
+    training_output.train(epochs=100000, patience=50)
+    training_output.predict_and_print()
 
 if __name__ == "__main__":
     main()
