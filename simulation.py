@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 from jax import random, value_and_grad
 from jax.example_libraries import stax
-from jax.example_libraries.stax import Dense, Relu, Softplus
+from jax.example_libraries.stax import Dense, Relu, BatchNorm, Dropout
 import optax
 
 from conf.bus_config import location_buses
@@ -92,10 +92,9 @@ class SimulationDataPreparer:
         :param location_buses: Dictionary containing bus location information.
         :param generator_data_hourly: Hourly generator data after resampling.
         """
-        # Counting buses in each region
         region_counts = {}
         for _, (_, _, region) in location_buses.items():
-            if region != 'extgrid':  # Exclude buses with 'extgrid' region
+            if region != 'extgrid': 
                 region_counts[region] = region_counts.get(region, 0) + 1
         # print(f"---- region: {region_counts}")
 
@@ -133,18 +132,15 @@ class SimulationDataPreparer:
             if region != 'extgrid':  # Exclude 'extgrid' region for loading
                 region_counts[region] = region_counts.get(region, 0) + 1
 
-        # Iterating over all the regions
-        for region_idx in range(1, 78):  # Assuming region indices range from 1 to 78
+        for region_idx in range(1, 78):
             total_buses_in_region = region_counts.get(region_idx, 0)
             if total_buses_in_region == 0:
                 print(f"No buses found in region {region_idx}. Skipping...")
                 continue
 
-            # Extracting single values for p_mw and q_mvar for the region
             p_mw = load_active.iloc[region_idx, time_point] / total_buses_in_region  # Active power in MW
             q_mvar = load_reactive.iloc[region_idx, time_point] / total_buses_in_region  # Reactive power in MVAr
 
-            # Create a load on each bus within the region
             for bus_name, (_, _, bus_region) in location_buses.items():
                 if bus_region == region_idx and bus_region != 'extgrid':
                     bus_index = bus_name_to_index_map.get(bus_name)
@@ -334,13 +330,15 @@ class TrainingOutput:
         self.target_means = None
         self.target_stds = None
 
-    def create_fcnn_model(self):
+    def create_fcnn_model():
         return stax.serial(
-            Dense(128), Relu,
-            Dense(64), Relu,
-            Dense(32), Relu,
-            Dense(16), Relu,
-            Dense(3)
+            Dense(128), BatchNorm(), Relu,
+            Dropout(0.5),  # Dropout after activation
+            Dense(64), BatchNorm(), Relu,
+            Dropout(0.5),  # Another dropout after another activation layer
+            Dense(32), BatchNorm(), Relu,
+            Dense(16), BatchNorm(), Relu,
+            Dense(3)  # Output layer
         )
 
     def normalize(self, data, means, stds):
