@@ -200,13 +200,11 @@ class pre_check_simulation:
     def advanced_pre_simulation_checks(net):
         print("Performing advanced pre-simulation checks...")
 
-        # Exclude external grid buses from certain checks
         ext_grid_buses = set(net.ext_grid.bus.values)
 
-        # Check for attached loads or sgens, ignoring external grid buses
         for bus in net.bus.index:
             if bus in ext_grid_buses:
-                continue  # Skip checks for external grid buses
+                continue  # no checks for extgrids.
             has_load = net.load[net.load.bus == bus].shape[0] > 0
             has_sgen = net.sgen[net.sgen.bus == bus].shape[0] > 0
             if not (has_load or has_sgen):
@@ -217,16 +215,16 @@ class pre_check_simulation:
         print("Balancing total generation with total load to mitigate significant power imbalance.")
         
         total_load_p = net.load.p_mw.sum()
-        total_generation_p = net.sgen.p_mw.sum() + net.gen.p_mw.sum()
+        total_generation_p = net.sgen.p_mw.sum()
 
-        # Check if 'q_mvar' column exists in load DataFrame
+        # Check 'q_mvar' in load
         if 'q_mvar' in net.load.columns:
             total_load_q = net.load.q_mvar.sum()
         else:
             print("Warning: 'q_mvar' column does not exist in net.load. Assuming zero reactive power for loads.")
             total_load_q = 0
 
-        # Check if 'q_mvar' column exists in sgen DataFrame
+        # Check 'q_mvar' in sgen
         if 'q_mvar' in net.res_sgen.columns:
             total_generation_q_sgen = net.sgen.q_mvar.sum()
         else:
@@ -240,7 +238,7 @@ class pre_check_simulation:
         scaling_factor_p = desired_total_generation_p / total_generation_p if total_generation_p != 0 else 1
 
         # Balancing reactive power
-        desired_total_generation_q = total_load_q * 1.1  # Assuming a 10% reserve margin for reactive power as well
+        desired_total_generation_q = total_load_q * 1.1  # 10% reserve margin for reactive power as well
         scaling_factor_q = desired_total_generation_q / total_generation_q if total_generation_q != 0 else 1
 
         net.sgen.p_mw *= scaling_factor_p
@@ -255,7 +253,7 @@ class pre_check_simulation:
         print(f"After balancing, Total Generation Q: {total_generation_q_sgen}, Total Load Q: {total_load_q}")
 
         # Check for reactive power imbalance
-        if abs(total_generation_q - total_load_q) > 10:  # Define threshold based on your network
+        if abs(total_generation_q - total_load_q) > 10:  # threshold
             print("Significant reactive power imbalance detected.")
 
     @staticmethod
@@ -277,7 +275,7 @@ class pre_check_simulation:
     def check_reactive_power_balance(net):
         q_generation_capacity = sum([gen.q_mvar for gen in net.sgen.itertuples()]) + sum([gen.q_mvar for gen in net.gen.itertuples()])
         q_load_demand = net.load.q_mvar.sum()
-        if abs(q_generation_capacity - q_load_demand) > 10:  # Define threshold based on your network
+        if abs(q_generation_capacity - q_load_demand) > 10:  # Define threshold
             print("Significant reactive power imbalance detected.")
 
     @staticmethod
@@ -298,24 +296,24 @@ class pre_check_simulation:
         adjusting generation or shedding load.
         """
         print("Checking for overloads...")
-        pp.runpp(net, algorithm='nr')  # Running initial power flow to detect overloads
+        pp.runpp(net, algorithm='nr')  # detect overloads
 
-        # Identifying overloaded lines
+        # overloaded lines
         overloaded_lines = net.res_line[net.res_line.loading_percent > 100].index.tolist()
         overloaded_trafos = net.res_trafo[net.res_trafo.loading_percent > 100].index.tolist()
 
         if overloaded_lines or overloaded_trafos:
-            print(f"Overloaded lines: {overloaded_lines}, Overloaded transformers: {overloaded_trafos}")
+            print(f"Overloaded lines: {overloaded_lines}")
             # Implement mitigation strategy here, for example:
             # - Adjusting generation
             # - Load shedding
             # - Re-routing power (if applicable)
             # This is a placeholder for your specific logic
-            print("Implementing mitigation strategy...")
-            # Example mitigation strategy: Reducing load proportionally
-            net.load.loc[:, 'p_mw'] = net.load.loc[:, 'p_mw'] * 0.9
-            print("Re-running power flow after mitigation...")
-            pp.runpp(net, algorithm='nr')
+            # print("Implementing mitigation strategy...")
+            # # Reducing load proportionally
+            # net.load.loc[:, 'p_mw'] = net.load.loc[:, 'p_mw'] * 0.9
+            # print("Re-running power flow after mitigation...")
+            # pp.runpp(net, algorithm='nr')
         else:
             print("No overloads detected.")
 
