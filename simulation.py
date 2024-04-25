@@ -141,7 +141,7 @@ class Simulation:
         y = [P_line, Q_line, V]
 
         print("\nSimulation output Y:")
-        # print(y)
+        print(y)
         # print(self.net.res_line)
         print("\nSimulation inputs X:")
         x = []
