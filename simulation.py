@@ -1,4 +1,5 @@
 import numpy as np
+import pickle
 import pandapower as pp
 import pandas as pd
 import pandapower.plotting as plot
@@ -14,6 +15,27 @@ class Simulation:
         self.num_buses = num_buses
         self.battery_soc = {bus_index: 0.5 for bus_index in range(num_buses)}
         self.battery_capacity = {bus_index: max_battery_capacity for bus_index in range(num_buses)}
+        self.load_demand = None
+        self.generation = None
+
+    def load_data(self, demand_path, generation_path):
+        with open(demand_path, 'rb') as f:
+            self.load_demand = pickle.load(f)
+        with open(generation_path, 'rb') as f:
+            self.generation = pickle.load(f)     
+
+    def variables(self, lower_P, upper_P, lower_Q, upper_Q):
+        P_L = np.random.uniform(lower_P, upper_P) 
+        Q_L = np.random.uniform(lower_Q, upper_Q) 
+        P_G = np.random.uniform(lower_P, upper_P) 
+        S_G = P_G 
+        return P_L, Q_L, P_G, S_G
+    
+    def update_qg(self, S_G, lower_bound=0.9):
+        P_G = np.random.uniform(lower_bound*S_G, S_G)
+        sigma = np.random.choice([-1, 1])
+        Q_G = sigma * np.sqrt(max(0, S_G**2 - P_G**2))
+        return Q_G, P_G
 
     def create_std_line(self):
         pp.create_std_type(self.net, line_data, name="Al/St 240/40 4-bundle 380.0", element='line')
@@ -25,7 +47,7 @@ class Simulation:
             if value[2] == 'extgrid':
                 pp.create_ext_grid(self.net, bus=bus_index, name=key)
             else:
-                pp.create_sgen(self.net, bus=bus_index, p_mw=np.random.uniform(10, 20), q_mvar=np.random.uniform(5, 10), name=f"sgen {key}")
+                pp.create_sgen(self.net, bus=bus_index, p_mw=0, q_mvar=0, name=f"sgen {key}")
     
     def initialize_connection(self):
         for line in line_connections:
@@ -60,15 +82,19 @@ class Simulation:
 
     def add_loads(self):
         for bus_index in self.bus_index_name_mapping.keys():
-            pp.create_load(self.net, bus=bus_index, p_mw=np.random.uniform(10, 20), q_mvar=np.random.uniform(5, 10), name=f"Load at {self.bus_index_name_mapping[bus_index]}")
+            P_L, _, Q_L, _ = self.variables(10, 20, 5, 10)
+            pp.create_load(self.net, bus=bus_index, p_mw=P_L, q_mvar=Q_L, name=f"Load at {self.bus_index_name_mapping[bus_index]}")
 
     def update_hourly_changes(self):
         for idx, bus_idx in enumerate(self.net.load.index):
-            self.net.load.at[bus_idx, 'p_mw'] = np.random.uniform(10, 20)
-            self.net.load.at[bus_idx, 'q_mvar'] = np.random.uniform(5, 10)
+            Q_L, _, P_L, _ = self.variables(5, 10, 10, 20)
+            self.net.load.at[bus_idx, 'p_mw'] = P_L
+            self.net.load.at[bus_idx, 'q_mvar'] = Q_L
         for idx, bus_idx in enumerate(self.net.sgen.index):
-            self.net.sgen.at[bus_idx, 'p_mw'] = np.random.uniform(15, 30)
-            self.net.sgen.at[bus_idx, 'q_mvar'] = np.random.uniform(10, 15)
+            _, _, P_G, S_G = self.variables(10, 30, 0, 0) 
+            Q_G, P_G = self.update_qg(S_G)
+            self.net.sgen.at[bus_idx, 'p_mw'] = P_G
+            self.net.sgen.at[bus_idx, 'q_mvar'] = Q_G
 
     def run_simulation(self):
         self.update_sgens_with_battery()
@@ -127,6 +153,10 @@ class Simulation:
         return X_cols, Y_cols
 
 if __name__ == '__main__':
+    config_data = {
+        'demand_data': './data/demand.pickle',
+        'generation_data': './data/generation.pickle'
+    }
     sim = Simulation()
     sim.create_std_line()
     sim.initialize_network()
