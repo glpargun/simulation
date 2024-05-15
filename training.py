@@ -241,6 +241,6 @@ if __name__ == '__main__':
     y_pred_scaled = model.power_flow(model.params, model.data['X_test_jax'][:, :6], model.data['X_test_jax'][:, 6:])
     y_pred = model.scalers['scaler_y'].inverse_transform(y_pred_scaled)
     y_true = model.scalers['scaler_y'].inverse_transform(model.data['y_test_jax'])
-    plt.plot(y_pred[:500, 0])
-    plt.plot(y_true[:500, 0])
+    plt.plot(y_pred[:100, 0])
+    plt.plot(y_true[:100, 0])
     plt.show()
