@@ -1,7 +1,6 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import random
 from simulation import Simulation
 
 from conf.connection_config import line_connections
@@ -19,23 +18,23 @@ class BatteryScheduler:
     def objective_function(self, SOC, dSOC, line_loadings):
         penalty_soc_bounds = np.sum((SOC < self.soc_min) + (SOC > self.soc_max))
         deviation_from_target = np.sum((SOC - 0.5)**2)
-        smoothness_penalty = np.sum((SOC[1:] - SOC[:-1] - dSOC[:-1])**2)
+        smoothness_penalty = np.sum((SOC[:, 1:] - SOC[:, :-1] - dSOC)**2)
         line_loading_penalty = np.sum((line_loadings - self.threshold)**2)
         return penalty_soc_bounds + deviation_from_target + smoothness_penalty + self.alpha * line_loading_penalty
 
     def optimize_battery_schedule(self, line_loadings, initial_SOC=0.5):
-        SOC = np.full(24, initial_SOC)
-        dSOC = np.zeros(23)  # dSOC should have length 23 for hourly differences in a day
+        SOC = np.full((self.num_buses, 24), initial_SOC)
+        dSOC = np.zeros((self.num_buses, 23))  # dSOC should have length 23 for hourly differences in a day
 
         for _ in range(self.iterations):
             grad_SOC = 2 * (SOC - 0.5)
-            grad_dSOC = 2 * (line_loadings - self.threshold)
+            grad_dSOC = 2 * (line_loadings[:23] - self.threshold)  # Adjusting size for 23 hours
 
-            SOC[:-1] -= self.learning_rate * grad_SOC[:-1]
-            dSOC -= self.learning_rate * grad_dSOC[:-1]
+            SOC[:, :-1] -= self.learning_rate * grad_SOC[:, :-1]
+            dSOC -= self.learning_rate * grad_dSOC[np.newaxis, :]  # Broadcasting to match shape
 
             SOC = np.clip(SOC, self.soc_min, self.soc_max)
-            SOC[1:] = SOC[:-1] + dSOC  # Ensure SOC transition constraint
+            SOC[:, 1:] = SOC[:, :-1] + dSOC  # Ensure SOC transition constraint
 
         return SOC, dSOC
 
@@ -45,15 +44,16 @@ def load_line_loading_data(file_path):
 
 def plot_daily_battery_status(SOC, dSOC, line_loadings, day, bus_index_name_mapping, line_connections):
     plt.figure(figsize=(14, 10))
-    
+
     plt.subplot(3, 1, 1)
-    plt.plot(SOC, label='State of Charge (SOC)')
+    for bus in range(SOC.shape[0]):
+        plt.plot(SOC[bus], label=f'SOC Bus {bus}')
     plt.xlabel('Hour')
     plt.ylabel('SOC')
     plt.title(f'Battery SOC for Day {day}')
     plt.legend()
 
-    for i, (soc, dsoc) in enumerate(zip(SOC, np.concatenate(([0], dSOC)))):
+    for i, (soc, dsoc) in enumerate(zip(SOC[0], np.concatenate(([0], dSOC[0])))):  # Example with first bus
         if dsoc > 0:
             plt.annotate('Charging', xy=(i, soc), xytext=(i, soc + 0.05), arrowprops=dict(facecolor='green', shrink=0.05))
         elif dsoc < 0:
@@ -77,11 +77,13 @@ def plot_daily_battery_status(SOC, dSOC, line_loadings, day, bus_index_name_mapp
         plt.annotate('Underloaded', xy=(line, line_loadings[line]), xytext=(line, line_loadings[line] - 5), arrowprops=dict(facecolor='blue', shrink=0.05))
 
     plt.subplot(3, 1, 3)
-    plt.bar(range(len(bus_index_name_mapping)), [SOC[-1]]*len(bus_index_name_mapping))
+    bus_indices = [i for i in bus_index_name_mapping.keys() if 'extgrid' not in bus_index_name_mapping[i]]
+    soc_values = [SOC[i, -1] for i in bus_indices if i < SOC.shape[0]]
+    plt.bar(range(len(bus_indices)), soc_values)
     plt.xlabel('Bus')
     plt.ylabel('SOC')
     plt.title(f'Battery SOC at Buses for Day {day}')
-    plt.xticks(range(len(bus_index_name_mapping)), list(bus_index_name_mapping.keys()), rotation=90)
+    plt.xticks(range(len(bus_indices)), [bus_index_name_mapping[i] for i in bus_indices], rotation=90)
     plt.legend()
 
     plt.tight_layout()
@@ -107,8 +109,13 @@ if __name__ == '__main__':
     sim.initialize_network()
     sim.initialize_connection()
     sim.add_loads()
-    bus_index_name_mapping = sim.bus_index_name_mapping
-    line_connections = line_connections  # Assuming this variable is imported from the simulation configuration
+
+    # Filter out external grids
+    bus_index_name_mapping = {idx: name for idx, name in sim.bus_index_name_mapping.items() if 'extgrid' not in name}
+    filtered_num_buses = len(bus_index_name_mapping)
+
+    # Update the scheduler with the filtered number of buses
+    scheduler.num_buses = filtered_num_buses
 
     # Visualize the battery status for the entire year
     plot_annual_battery_status(scheduler, line_loadings, bus_index_name_mapping, line_connections)
