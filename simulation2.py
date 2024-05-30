@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import pandapower as pp
-import random
+import pandapower.plotting as plot
 
 from conf.bus_config import location_buses
 from conf.connection_config import line_connections
@@ -19,6 +19,7 @@ class Simulation:
         self.E_max = E_max
         self.load_demand = None
         self.generation = None
+        self.updated_P_G = []
 
     def load_data(self, demand_path, generation_path):
         try:
@@ -43,7 +44,7 @@ class Simulation:
             print(f"Error in data aggregation: {e}")
 
     def update_qg(self, S_G, lower_bound=0.9):
-        P_G = np.random.uniform(lower_bound * S_G, S_G)
+        P_G = np.random.uniform(lower_bound*S_G, S_G)
         sigma = np.random.choice([-1, 1])
         Q_G = sigma * np.sqrt(max(0, S_G**2 - P_G**2))
         return Q_G, P_G
@@ -94,35 +95,30 @@ class Simulation:
     def update_battery_soc_and_pg(self, current_hour):
         P_ch_max = 0.1  # Max charging power
         P_dch_max = 0.1  # Max discharging power
-        soc_min = 0.3  # Minimum SOC constraint
-        soc_max = 0.7  # Maximum SOC constraint
+        soc_min = 0.1
+        soc_max = 0.7
         
-        updated_P_dES = self.generation.iloc[:, current_hour].copy()
+        updated_P_G = self.generation.iloc[:, current_hour].copy()
 
         for bus_index in range(self.num_buses):
-            if bus_index not in self.bus_index_name_mapping or bus_index not in updated_P_dES.index:
+            if bus_index not in self.bus_index_name_mapping or bus_index not in updated_P_G.index:
                 continue
             current_soc = self.battery_soc[bus_index]
             battery_capacity_mwh = self.battery_capacity[bus_index]
-            
+                
             P_ch = min(P_ch_max, (soc_max - current_soc) * battery_capacity_mwh / (self.eta_ch * self.E_max))
             P_dch = min(P_dch_max, (current_soc - soc_min) * battery_capacity_mwh * self.eta_dch / self.E_max)
-            
-            # Randomly decide whether to charge or discharge
-            r = random.choice([True, False])
-            if r:
-                # Charge the battery
-                current_soc += P_ch * self.eta_ch / battery_capacity_mwh
-                updated_P_dES[bus_index] += P_ch
-            else:
-                # Discharge the battery
-                current_soc -= P_dch / (self.eta_dch * battery_capacity_mwh)
-                updated_P_dES[bus_index] -= P_dch
                 
-            # Ensure SOC stays within the defined bounds (0.3 <= SOC <= 0.7)
+            if current_hour % 2 == 0:
+                current_soc += P_ch * self.eta_ch / battery_capacity_mwh
+                updated_P_G[bus_index] += P_ch
+            else:
+                current_soc -= P_dch / (self.eta_dch * battery_capacity_mwh)
+                updated_P_G[bus_index] -= P_dch
+                
             self.battery_soc[bus_index] = min(max(current_soc, soc_min), soc_max)
 
-        return updated_P_dES
+        self.updated_P_G.append(updated_P_G)
 
     def add_loads(self):
         for bus_index in self.bus_index_name_mapping.keys():
@@ -131,7 +127,6 @@ class Simulation:
             pp.create_load(self.net, bus=bus_index, p_mw=P_L, q_mvar=Q_L, name=f"Load at {self.bus_index_name_mapping[bus_index]}")
 
     def update_hourly_changes(self, current_hour):
-        updated_P_dES = self.update_battery_soc_and_pg(current_hour)
         for bus_idx in self.net.bus.index:
             zone = self.net.bus.at[bus_idx, 'zone']
             if zone == 'extgrid':
@@ -140,11 +135,10 @@ class Simulation:
             # Find corresponding data for this bus if it exists
             if bus_idx in self.load_demand.index and bus_idx in self.generation.index:
                 P_L = self.load_demand.iloc[bus_idx, current_hour]
-                # Randomly generate Q_L and Q_G within a realistic range
-                Q_L = P_L * np.random.uniform(0.85, 1.15)  # Assuming power factor variation for Q calculation
+                Q_L = P_L * 0.9  # Assuming a power factor for Q calculation
 
-                P_G = updated_P_dES[bus_idx]
-                Q_G = P_G * np.random.uniform(0.85, 1.15)  # Assuming power factor variation for Q calculation
+                P_G = self.generation.iloc[bus_idx, current_hour]
+                Q_G = P_G * 0.9  # Assuming a power factor for Q calculation
 
                 self.net.load.at[bus_idx, 'p_mw'] = P_L
                 self.net.load.at[bus_idx, 'q_mvar'] = Q_L
@@ -152,7 +146,9 @@ class Simulation:
                 self.net.sgen.at[bus_idx, 'p_mw'] = P_G
                 self.net.sgen.at[bus_idx, 'q_mvar'] = Q_G
 
-                print(f"--bus id: {bus_idx} -P_L: {P_L}, Q_L: {Q_L}, P_dES: {P_G}, Q_dES: {Q_G}")
+                print(f"--bus id: {bus_idx} -P_L: {P_L}, Q_L: {Q_L}, P_G: {P_G}, Q_G: {Q_G}")
+
+        self.update_battery_soc_and_pg(current_hour)
 
     def run_simulation(self):
         try:
@@ -167,11 +163,11 @@ class Simulation:
         V = self.net.res_bus['vm_pu'].values
         L_P = self.net.res_line['loading_percent'].values
         target = np.hstack([P_line, Q_line, V, L_P])[np.newaxis, :]
-        P_dES = self.net.sgen['p_mw'].values
-        Q_dES = self.net.sgen['q_mvar'].values
+        P_G = self.net.sgen['p_mw'].values
+        Q_G = self.net.sgen['q_mvar'].values
         P_L = self.net.load['p_mw'].values
         Q_L = self.net.load['q_mvar'].values
-        inputs = np.hstack([P_dES, Q_dES, P_L, Q_L])[np.newaxis, :]
+        inputs = np.hstack([P_G, Q_G, P_L, Q_L])[np.newaxis, :]
         return target, inputs
 
     def create_dataset(self, days=365, num_samples=1):
@@ -191,6 +187,7 @@ class Simulation:
                 print(f"Completed simulations for Sample {sample + 1}, Day {day + 1}.")
         self.Y = np.vstack(Y)
         self.X = np.vstack(X)
+        self.updated_P_G = np.vstack(self.updated_P_G)
         print("Dataset creation complete.")
 
     def save_dataset(self):
@@ -198,9 +195,11 @@ class Simulation:
         X_cols, Y_cols = self.get_columns()
         Y_df = pd.DataFrame(data=self.Y, columns=Y_cols)
         X_df = pd.DataFrame(data=self.X, columns=X_cols)
+        updated_P_G_df = pd.DataFrame(data=self.updated_P_G, columns=[f"P_G{i}" for i in range(self.updated_P_G.shape[1])])
         try:
             Y_df.to_csv('./data/Y_PF.csv', index=False)
             X_df.to_csv('./data/X_PF.csv', index=False)
+            updated_P_G_df.to_csv('./data/updated_P_G.csv', index=False)
             print("Datasets saved successfully")
         except Exception as e:
             print(f"Failed to save datasets: {e}")
@@ -208,8 +207,8 @@ class Simulation:
     def get_columns(self):
         X_cols, Y_cols = [], []
         for i in range(len(self.net.sgen)):
-            X_cols.append(f"P_dES{i}")
-            X_cols.append(f"Q_dES{i}")
+            X_cols.append(f"P_G{i}")
+            X_cols.append(f"Q_G{i}")
         for i in range(len(self.net.bus)):
             X_cols.append(f"P_L{i}")
             X_cols.append(f"Q_L{i}")
@@ -233,5 +232,5 @@ if __name__ == '__main__':
     sim.initialize_connection()
     sim.add_loads()
     sim.load_data(config_data['demand_data'], config_data['generation_data'])
-    sim.create_dataset(days=10, num_samples=1)
+    sim.create_dataset(days=365)
     sim.save_dataset()
